@@ -10,14 +10,7 @@ import random
 import tensorflow.compat.v1 as tf
 tf.compat.v1.disable_eager_execution()
 
-# yf.pdr_override()
-df_full = pdr.get_data_yahoo("INFY", start="2018-01-01").reset_index()
-df_full.to_csv('INFY.csv', index=False)
-df_full.head()
-
-df = df_full.copy()
-name = 'Q-learning agent'
-
+name = 'Q-learning agent_v2'
 class Agent:
     def __init__(self, state_size, window_size, trend, skip, batch_size):
         self.state_size = state_size
@@ -27,6 +20,10 @@ class Agent:
         self.skip = skip
         self.action_size = 3 # LIczba możliwych akcji do wykonania
         self.batch_size = batch_size
+        
+        self.portfolio_volume = 0 # wolumen otwartej pozycji na giełdzie
+        self.portfolio_value = 0 # wartość wolumenu otwartej pozycji
+
         self.memory = deque(maxlen=1000)
         self.inventory = []
         self.gamma = 0.95
@@ -58,7 +55,10 @@ class Agent:
         '''
         window_size = self.window_size + 1
         d = t - window_size + 1
-        block = self.trend[d : t + 1] if d >= 0 else -d * [self.trend[0]] + self.trend[0 : t + 1]
+        if (d >= 0):
+            block = self.trend[d : t + 1]
+        else:
+            block =  -d * [self.trend[0]] + self.trend[0 : t + 1]
         res = []
         for i in range(window_size - 1):
             res.append(block[i + 1] - block[i])
@@ -70,8 +70,10 @@ class Agent:
         for i in range(l - batch_size, l):
             mini_batch.append(self.memory[i])
         replay_size = len(mini_batch)
+
         X = np.empty((replay_size, self.state_size))
         Y = np.empty((replay_size, self.action_size))
+
         states = np.array([a[0][0] for a in mini_batch])
         new_states = np.array([a[3][0] for a in mini_batch])
         Q = self.sess.run(self.logits, feed_dict = {self.X: states})
@@ -95,64 +97,167 @@ class Agent:
         starting_money = initial_money
         states_sell = []
         states_buy = []
-        inventory = []
+        current_money = starting_money
+        portfolio_volume = 0
+        portfolio_value = 0
         state = self.get_state(0)
+
+            
         for t in range(0, len(self.trend) - 1, self.skip):
+            MAX_OPEN_POSITION = 10
+            left_transaction_days = len(self.trend) - t
+            if left_transaction_days < self.window_size:
+                limit_open_position = MAX_OPEN_POSITION // (self.window_size - left_transaction_days) 
+            else:
+                limit_open_position = MAX_OPEN_POSITION
+            
             action = self.act(state)
             next_state = self.get_state(t + 1)
 
-
-            if action == 1 and initial_money >= self.trend[t] and t < (len(self.trend) - self.half_window):
-                inventory.append(self.trend[t])
-                initial_money -= self.trend[t]
+            # Action Buy
+            if (action == 1) and (portfolio_volume < limit_open_position):
+                buy_volume = 1
                 states_buy.append(t)
-                print('day %d: buy 1 unit at price %f, total balance %f'% (t, self.trend[t], initial_money))
-
-            elif action == 2 and len(inventory):
-                bought_price = inventory.pop(0)
-                initial_money += self.trend[t]
-                states_sell.append(t)
-                try:
-                    invest = ((close[t] - bought_price) / bought_price) * 100
-                except:
-                    invest = 0
-                print(
-                    'day %d, sell 1 unit at price %f, investment %f %%, total balance %f,'
-                    % (t, close[t], invest, initial_money)
-                )
+                current_money -= self.trend[t] * buy_volume
+                # change price of portfolio
+                if portfolio_volume >= 0:
+                    portfolio_volume += buy_volume
+                    portfolio_value += self.trend[t] * buy_volume
+                    portfolio_price = portfolio_value / portfolio_volume
+                elif (portfolio_volume + buy_volume) < 0:
+                    portfolio_value = portfolio_value * (1 + buy_volume / portfolio_volume)
+                    portfolio_volume += buy_volume
+                elif (portfolio_volume + buy_volume) > 0:
+                    portfolio_value = self.trend[t] * (portfolio_volume + buy_volume)
+                    portfolio_volume += buy_volume
+                    portfolio_price = portfolio_value / portfolio_volume
+                else:
+                    portfolio_value = 0 
+                    portfolio_volume = 0
+                    portfolio_price = None
                 
+            
+            # Action Sell
+            elif action == 2 and ((-1 * portfolio_volume) < limit_open_position):
+                sell_volume = -1
+                states_sell.append(t)
+                current_money -= self.trend[t] * sell_volume
+                # change price of portfolio
+                if portfolio_volume <= 0:
+                    portfolio_volume += sell_volume
+                    portfolio_value += self.trend[t] * sell_volume
+                    portfolio_price = portfolio_value / portfolio_volume
+                elif (portfolio_volume + sell_volume) < 0:
+                    portfolio_value = portfolio_value * (1 + sell_volume / portfolio_volume)
+                    portfolio_volume += sell_volume
+                elif (portfolio_volume + sell_volume) > 0:
+                    portfolio_value = self.trend[t] * (portfolio_volume + sell_volume)
+                    portfolio_volume += sell_volume
+                    portfolio_price = portfolio_value / portfolio_volume
+                else:
+                    portfolio_value = 0 
+                    portfolio_volume = 0
+                    portfolio_price = None
+
+        
+            if portfolio_volume < 0:
+                portoflio_value_market = portfolio_volume * self.trend[t] * 1.01
+            else: 
+                portoflio_value_market = portfolio_volume * self.trend[t] * 0.99
+                    
+            total_profit = current_money - initial_money + portoflio_value_market
+            invest = (total_profit / initial_money) * 100
+            print(f'Action: {action} ## Bilans: {current_money},{total_profit}, {portoflio_value_market} Current Portfel: {portfolio_volume}, with value {portfolio_value}; Market Price {self.trend[t]}')
             state = next_state
-        invest = ((initial_money - starting_money) / starting_money) * 100
-        total_gains = initial_money - starting_money
-        return states_buy, states_sell, total_gains, invest
+        
+        return states_buy, states_sell, total_profit, invest
 
     def train(self, iterations, checkpoint, initial_money):
         for i in range(iterations):
             total_profit = 0
-            inventory = []
             state = self.get_state(0)
-            starting_money = initial_money
+            current_money = initial_money
+            
+            portfolio_volume = 0
+            portfolio_value = 0
+            
             for t in range(0, len(self.trend) - 1, self.skip):
+                MAX_OPEN_POSITION = 10
+                left_transaction_days = len(self.trend) - t
+                if left_transaction_days < self.half_window:
+                    limit_open_position = MAX_OPEN_POSITION // (self.half_window - left_transaction_days) 
+                else:
+                    limit_open_position = MAX_OPEN_POSITION
+                
                 action = self.act(state)
                 next_state = self.get_state(t + 1)
-                if action == 1 and starting_money >= self.trend[t] and t < (len(self.trend) - self.half_window):
-                    inventory.append(self.trend[t])
-                    starting_money -= self.trend[t]
-                elif action == 2 and len(inventory) > 0:
-                    bought_price = inventory.pop(0)
-                    total_profit += self.trend[t] - bought_price
-                    starting_money += self.trend[t]
-                invest = ((starting_money - initial_money) / initial_money)
-                self.memory.append((state, action, invest, 
-                                    next_state, starting_money < initial_money))
+
+                # Action Buy
+                if (action == 1) and (portfolio_volume < limit_open_position):
+                    buy_volume = 1
+                    current_money -= self.trend[t] * buy_volume
+                    # change price of portfolio
+                    if portfolio_volume >= 0:
+                        portfolio_volume += buy_volume
+                        portfolio_value += self.trend[t] * buy_volume
+                        portfolio_price = portfolio_value / portfolio_volume
+                    elif (portfolio_volume + buy_volume) < 0:
+                        portfolio_value = portfolio_value * (1 + buy_volume / portfolio_volume)
+                        portfolio_volume += buy_volume
+                    elif (portfolio_volume + buy_volume) > 0:
+                        portfolio_value = self.trend[t] * (portfolio_volume + buy_volume)
+                        portfolio_volume += buy_volume
+                        portfolio_price = portfolio_value / portfolio_volume
+                    else:
+                        portfolio_value = 0 
+                        portfolio_volume = 0
+                        portfolio_price = None
+                    
+                
+                # Action Sell
+                elif action == 2 and ((-1 * portfolio_volume) < limit_open_position):
+                    sell_volume = -1
+                    current_money -= self.trend[t] * sell_volume
+                    # change price of portfolio
+                    if portfolio_volume <= 0:
+                        portfolio_volume += sell_volume
+                        portfolio_value += self.trend[t] * sell_volume
+                        portfolio_price = portfolio_value / portfolio_volume
+                    elif (portfolio_volume + sell_volume) < 0:
+                        portfolio_value = portfolio_value * (1 + sell_volume / portfolio_volume)
+                        portfolio_volume += sell_volume
+                    elif (portfolio_volume + sell_volume) > 0:
+                        portfolio_value = self.trend[t] * (portfolio_volume + sell_volume)
+                        portfolio_volume += sell_volume
+                        portfolio_price = portfolio_value / portfolio_volume
+                    else:
+                        portfolio_value = 0 
+                        portfolio_volume = 0
+                        portfolio_price = None
+                                
+                if portfolio_volume < 0:
+                    portoflio_value_market = portfolio_volume * self.trend[t] * 1.01
+                else: 
+                    portoflio_value_market = portfolio_volume * self.trend[t] * 0.99
+
+                total_profit = current_money - initial_money + portoflio_value_market
+                local_profit = portoflio_value_market - portfolio_value
+
+                invest = (total_profit / initial_money)
+                
+                self.memory.append((state, action, local_profit, 
+                                    next_state, local_profit < 0))
+
                 state = next_state
                 batch_size = min(self.batch_size, len(self.memory))
                 cost = self.replay(batch_size)
-            if (i+1) % checkpoint == 0:
-                print('epoch: %d, total rewards: %f.3, cost: %f, total money: %f'%(i + 1, total_profit, cost,
-                                                                                  starting_money))
 
-close = df.Open.values.tolist()
+            if (i+1) % checkpoint == 0:
+                print('epoch: %d, total rewards: %f.3, cost: %f.3, total money: %f.3'%(i + 1, total_profit, cost,
+                                                                                  current_money))
+                print(f'{portfolio_volume}, {portfolio_value}')
+
+
 from google.cloud import bigquery
 
 project_id = 'pl-ist-global-trading-dev'
@@ -171,8 +276,8 @@ df = client.query(RTT_query).to_dataframe()
 year_21_df = df[ (df['ProductName'] == "BASE_Y-21") & (df['Volume_MWh'] > 0) ].set_index('TradedDatePL').sort_index()
 close = year_21_df['Price_PLNperMWh'].values.tolist()
 
-INITAL_MONEY = 10e6
-initial_money = INITAL_MONEY / 8760
+INITIAL_MONEY = 10e6
+initial_money = INITIAL_MONEY / 8760
 window_size = 10
 skip = 1
 batch_size = 32
