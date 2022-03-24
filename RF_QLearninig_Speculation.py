@@ -10,10 +10,10 @@ import random
 import tensorflow.compat.v1 as tf
 tf.compat.v1.disable_eager_execution()
 
-name = 'Q-learning agent_v2'
+name = 'Q-learning agent_v3'
 class Agent:
     def __init__(self, state_size, window_size, trend, skip, batch_size):
-        self.state_size = state_size
+        self.state_size = state_size + 1 # add one number for open position
         self.window_size = window_size
         self.half_window = window_size // 2
         self.trend = trend
@@ -49,7 +49,7 @@ class Agent:
             self.sess.run(self.logits, feed_dict = {self.X: state})[0]
         )
 
-    def get_state(self, t):
+    def get_state(self, t, portfolio_volume):
         '''
         Get information about Market at state t
         '''
@@ -62,6 +62,7 @@ class Agent:
         res = []
         for i in range(window_size - 1):
             res.append(block[i + 1] - block[i])
+        res.append(portfolio_volume)
         return np.array([res])
 
     def replay(self, batch_size):
@@ -93,14 +94,14 @@ class Agent:
             self.epsilon *= self.epsilon_decay
         return cost
 
-    def test(self, initial_money):
+    def test(self, initial_money, initial_portfolio_volume=0):
         starting_money = initial_money
         states_sell = []
         states_buy = []
         current_money = starting_money
-        portfolio_volume = 0
+        portfolio_volume = initial_portfolio_volume
         portfolio_value = 0
-        state = self.get_state(0)
+        state = self.get_state(0, portfolio_volume)
 
             
         for t in range(0, len(self.trend) - 1, self.skip):
@@ -112,7 +113,7 @@ class Agent:
                 limit_open_position = MAX_OPEN_POSITION
             
             action = self.act(state)
-            next_state = self.get_state(t + 1)
+            
 
             # Action Buy
             if (action == 1) and (portfolio_volume < limit_open_position):
@@ -164,7 +165,8 @@ class Agent:
                 portoflio_value_market = portfolio_volume * self.trend[t] * 1.01
             else: 
                 portoflio_value_market = portfolio_volume * self.trend[t] * 0.99
-                    
+            
+            next_state = self.get_state(t + 1, portfolio_volume)
             total_profit = current_money - initial_money + portoflio_value_market
             invest = (total_profit / initial_money) * 100
             print(f'Action: {action} ## Bilans: {current_money},{total_profit}, {portoflio_value_market} Current Portfel: {portfolio_volume}, with value {portfolio_value}; Market Price {self.trend[t]}')
@@ -172,14 +174,15 @@ class Agent:
         
         return states_buy, states_sell, total_profit, invest
 
-    def train(self, iterations, checkpoint, initial_money):
+    def train(self, iterations, checkpoint, initial_money, initial_portfolio_volume=0):
         for i in range(iterations):
             total_profit = 0
-            state = self.get_state(0)
+            portfolio_volume = initial_portfolio_volume
+            portfolio_value = 0
+
+            state = self.get_state(0, portfolio_volume)
             current_money = initial_money
             
-            portfolio_volume = 0
-            portfolio_value = 0
             
             for t in range(0, len(self.trend) - 1, self.skip):
                 MAX_OPEN_POSITION = 10
@@ -190,7 +193,7 @@ class Agent:
                     limit_open_position = MAX_OPEN_POSITION
                 
                 action = self.act(state)
-                next_state = self.get_state(t + 1)
+
 
                 # Action Buy
                 if (action == 1) and (portfolio_volume < limit_open_position):
@@ -236,10 +239,11 @@ class Agent:
                         portfolio_price = None
                                 
                 if portfolio_volume < 0:
-                    portoflio_value_market = portfolio_volume * self.trend[t] * 1.01
+                    portoflio_value_market = portfolio_volume * self.trend[t] * 1.05
                 else: 
-                    portoflio_value_market = portfolio_volume * self.trend[t] * 0.99
-
+                    portoflio_value_market = portfolio_volume * self.trend[t] * 0.95
+                
+                next_state = self.get_state(t + 1, portfolio_volume)
                 total_profit = current_money - initial_money + portoflio_value_market
                 local_profit = portoflio_value_market - portfolio_value
 
@@ -287,7 +291,7 @@ agent = Agent(state_size = window_size,
               skip = skip, 
               batch_size = batch_size)
 
-agent.train(iterations = 100, checkpoint = 10, initial_money = initial_money)
+agent.train(iterations = 1000, checkpoint = 10, initial_money = initial_money)
 
 states_buy, states_sell, total_gains, invest = agent.test(initial_money = initial_money)
 
